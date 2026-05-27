@@ -529,6 +529,8 @@ class KVStorage(BaseStorage):
     async def _get_json(self, key, default):
         val = await self.kv.get(key)
         if val is None: return default
+        if hasattr(val, "to_py"):
+            val = val.to_py()
         try:
             return json.loads(val)
         except:
@@ -573,8 +575,10 @@ class KVStorage(BaseStorage):
         cursor = None
         while True:
             res = await self.kv.list(prefix="u:", cursor=cursor)
-            count += len(res.keys)
-            cursor = res.cursor
+            if hasattr(res, "to_py"):
+                res = res.to_py()
+            count += len(res.get("keys", []))
+            cursor = res.get("cursor")
             if not cursor: break
         return count
 
@@ -587,8 +591,10 @@ class KVStorage(BaseStorage):
         cursor = None
         while True:
             res = await self.kv.list(prefix="b:", cursor=cursor)
-            count += len(res.keys)
-            cursor = res.cursor
+            if hasattr(res, "to_py"):
+                res = res.to_py()
+            count += len(res.get("keys", []))
+            cursor = res.get("cursor")
             if not cursor: break
         return count
 
@@ -597,11 +603,14 @@ class KVStorage(BaseStorage):
         cursor = None
         while True:
             res = await self.kv.list(prefix="u:", cursor=cursor)
-            for k in res.keys:
+            if hasattr(res, "to_py"):
+                res = res.to_py()
+            for k in res.get("keys", []):
                 try:
-                    users.append(int(k.name.split(":")[1]))
+                    name = k.get("name") if isinstance(k, dict) else k.name
+                    users.append(int(name.split(":")[1]))
                 except: pass
-            cursor = res.cursor
+            cursor = res.get("cursor")
             if not cursor: break
         return users
 
@@ -744,15 +753,18 @@ class KVStorage(BaseStorage):
         cursor = None
         while True:
             res = await self.kv.list(prefix="ref:", cursor=cursor)
-            for k in res.keys:
-                rd = await self._get_json(k.name, {})
+            if hasattr(res, "to_py"):
+                res = res.to_py()
+            for k in res.get("keys", []):
+                name = k.get("name") if isinstance(k, dict) else k.name
+                rd = await self._get_json(name, {})
                 pt = rd.get("premium_until")
                 if pt:
                     try:
                         if datetime.fromisoformat(pt) > now:
-                            results.append({"user_id": int(k.name.split(":")[1]), "premium_until": pt})
+                            results.append({"user_id": int(name.split(":")[1]), "premium_until": pt})
                     except: pass
-            cursor = res.cursor
+            cursor = res.get("cursor")
             if not cursor: break
         return results
 
@@ -2095,7 +2107,7 @@ async def init_storage(env=None) -> None:
 
 
 def create_app(token: str) -> Application:
-    app: Application = ApplicationBuilder().token(token).build()
+    app: Application = ApplicationBuilder().token(token).updater(None).build()
     app.add_handler(CommandHandler("start",        cmd_start))
     app.add_handler(CommandHandler("help",         cmd_help))
     app.add_handler(CommandHandler("admin",        cmd_admin))
@@ -2149,20 +2161,28 @@ def create_app(token: str) -> Application:
     return app
 
 
+# Global app instance to reuse across requests in the same isolate
+_cached_app = None
+
 async def on_fetch(request, env):
+    global _cached_app, storage
+
     # Update global config from env
     global BOT_TOKEN, OWNER_ID, OWNER_USERNAME, MINI_APP_URL, START_PHOTO
-    if hasattr(env, "BOT_TOKEN"): BOT_TOKEN = env.BOT_TOKEN
+    if hasattr(env, "BOT_TOKEN"): BOT_TOKEN = str(env.BOT_TOKEN)
     if hasattr(env, "OWNER_ID"): OWNER_ID = int(env.OWNER_ID)
-    if hasattr(env, "OWNER_USERNAME"): OWNER_USERNAME = env.OWNER_USERNAME.strip().lstrip("@")
-    if hasattr(env, "MINI_APP_URL"): MINI_APP_URL = env.MINI_APP_URL
-    if hasattr(env, "START_PHOTO"): START_PHOTO = env.START_PHOTO
+    if hasattr(env, "OWNER_USERNAME"): OWNER_USERNAME = str(env.OWNER_USERNAME).strip().lstrip("@")
+    if hasattr(env, "MINI_APP_URL"): MINI_APP_URL = str(env.MINI_APP_URL)
+    if hasattr(env, "START_PHOTO"): START_PHOTO = str(env.START_PHOTO)
 
     if storage is None:
         await init_storage(env)
 
-    app = create_app(BOT_TOKEN)
-    await app.initialize()
+    if _cached_app is None:
+        _cached_app = create_app(BOT_TOKEN)
+        await _cached_app.initialize()
+
+    app = _cached_app
 
     if request.method == "POST":
         try:
