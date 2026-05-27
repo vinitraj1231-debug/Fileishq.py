@@ -99,6 +99,7 @@ if not MINI_APP_URL:
 
 pending_requests: set[int] = set()
 storage = None  # assigned in main()
+_cached_app = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1034,7 +1035,7 @@ async def build_storage(env=None) -> BaseStorage:
         print("[DB] KV storage connected.")
         return kv_store
 
-    if MONGO_URI:
+    if MONGO_URI and AsyncIOMotorClient:
         try:
             mongo = MongoStorage(MONGO_URI)
             await mongo.init()
@@ -2151,32 +2152,45 @@ def create_app(token: str) -> Application:
 
 async def on_fetch(request, env):
     # Update global config from env
-    global BOT_TOKEN, OWNER_ID, OWNER_USERNAME, MINI_APP_URL, START_PHOTO
-    if hasattr(env, "BOT_TOKEN"): BOT_TOKEN = env.BOT_TOKEN
+    global BOT_TOKEN, OWNER_ID, OWNER_USERNAME, MINI_APP_URL, START_PHOTO, MONGO_URI
+    if hasattr(env, "BOT_TOKEN"): BOT_TOKEN = str(env.BOT_TOKEN).strip()
     if hasattr(env, "OWNER_ID"): OWNER_ID = int(env.OWNER_ID)
-    if hasattr(env, "OWNER_USERNAME"): OWNER_USERNAME = env.OWNER_USERNAME.strip().lstrip("@")
-    if hasattr(env, "MINI_APP_URL"): MINI_APP_URL = env.MINI_APP_URL
-    if hasattr(env, "START_PHOTO"): START_PHOTO = env.START_PHOTO
+    if hasattr(env, "OWNER_USERNAME"): OWNER_USERNAME = str(env.OWNER_USERNAME).strip().lstrip("@")
+    if hasattr(env, "MINI_APP_URL"): MINI_APP_URL = str(env.MINI_APP_URL).strip()
+    if hasattr(env, "START_PHOTO"): START_PHOTO = str(env.START_PHOTO).strip()
+    if hasattr(env, "MONGO_URI"): MONGO_URI = str(env.MONGO_URI).strip()
 
+    global storage
     if storage is None:
-        await init_storage(env)
+        storage = await build_storage(env)
 
-    app = create_app(BOT_TOKEN)
-    await app.initialize()
+    global _cached_app
+    if _cached_app is None:
+        _cached_app = create_app(BOT_TOKEN)
+        await _cached_app.initialize()
+
+    app = _cached_app
 
     if request.method == "POST":
         try:
             payload = await request.json()
-            # Convert payload to dict if it's a JS object
+            # Convert payload to dict if it's a JS object (for Pyodide/Workers runtime)
             if hasattr(payload, "to_py"):
                 payload = payload.to_py()
+
+            if not payload:
+                return Response.new("Empty payload", status=400)
+
             update = Update.de_json(payload, app.bot)
-            await app.process_update(update)
+            if update:
+                await app.process_update(update)
+            else:
+                print("Failed to parse update from payload")
         except Exception as exc:
             print(f"Error processing update: {exc}")
         return Response.new("OK")
 
-    return Response.new("Bot is running!")
+    return Response.new(f"{BOT_NAME} is running!")
 
 
 def main() -> None:
