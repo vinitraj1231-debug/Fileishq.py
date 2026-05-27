@@ -1,0 +1,3 @@
+python-telegram-bot
+# motor and pymongo are likely not supported in Cloudflare Workers Python runtime yet due to socket limitations.
+# We will use Cloudflare KV for storage instead.

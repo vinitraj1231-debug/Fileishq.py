@@ -1,0 +1,19 @@
+name = "blaze-bot"
+main = "main.py"
+compatibility_date = "2024-03-25"
+compatibility_flags = ["python_workers"]
+
+# Bindings for storage
+[[kv_namespaces]]
+binding = "BLAZE_KV"
+# You should replace this ID with your actual KV namespace ID after creating it with:
+# wrangler kv:namespace create BLAZE_KV
+id = "place-your-kv-id-here"
+
+[vars]
+# These can also be set via `wrangler secret put KEY` (recommended for tokens)
+# BOT_TOKEN = "YOUR_BOT_TOKEN"
+# OWNER_ID = "YOUR_OWNER_ID"
+# OWNER_USERNAME = "SoulEgoisticVertex"
+# MINI_APP_URL = "http://t.me/ItsBlaze_bot/BLAZE"
+# START_PHOTO = "https://i.ibb.co/r2vdvLdP/43f0c9c7b235.jpg"
