@@ -13,8 +13,18 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ASCENDING
+try:
+    from js import Response
+except ImportError:
+    # Not running in Cloudflare Workers
+    Response = None
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    from pymongo import ASCENDING
+except ImportError:
+    AsyncIOMotorClient = None
+    ASCENDING = 1
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -507,6 +517,247 @@ class JsonStorage(BaseStorage):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  KV STORAGE (Cloudflare)
+# ═══════════════════════════════════════════════════════════════
+class KVStorage(BaseStorage):
+    def __init__(self, kv):
+        self.kv = kv
+
+    async def init(self) -> None:
+        pass
+
+    async def _get_json(self, key, default):
+        val = await self.kv.get(key)
+        if val is None: return default
+        try:
+            return json.loads(val)
+        except:
+            return default
+
+    async def _set_json(self, key, value):
+        await self.kv.put(key, json.dumps(value))
+
+    async def save_user(self, user) -> None:
+        await self.kv.put(f"u:{user.id}", json.dumps({
+            "user_id": user.id,
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "username": user.username or "",
+            "language_code": getattr(user, "language_code", "") or "",
+            "updated_at": now_utc(),
+        }))
+
+    async def is_banned(self, user_id: int) -> bool:
+        return await self.kv.get(f"b:{user_id}") is not None
+
+    async def ban_user(self, user_id: int) -> None:
+        await self.kv.put(f"b:{user_id}", json.dumps({"user_id": user_id, "banned_at": now_utc()}))
+
+    async def unban_user(self, user_id: int) -> bool:
+        existed = await self.kv.get(f"b:{user_id}") is not None
+        if existed:
+            await self.kv.delete(f"b:{user_id}")
+        return existed
+
+    async def add_request(self, user, text: str) -> None:
+        reqs = await self._get_json("requests_list", [])
+        reqs.append({
+            "user_id": user.id, "username": user.username or "",
+            "first_name": user.first_name or "", "text": text, "created_at": now_utc(),
+        })
+        if len(reqs) > 100: reqs = reqs[-100:]
+        await self._set_json("requests_list", reqs)
+
+    async def count_users(self) -> int:
+        count = 0
+        cursor = None
+        while True:
+            res = await self.kv.list(prefix="u:", cursor=cursor)
+            count += len(res.keys)
+            cursor = res.cursor
+            if not cursor: break
+        return count
+
+    async def count_requests(self) -> int:
+        reqs = await self._get_json("requests_list", [])
+        return len(reqs)
+
+    async def count_bans(self) -> int:
+        count = 0
+        cursor = None
+        while True:
+            res = await self.kv.list(prefix="b:", cursor=cursor)
+            count += len(res.keys)
+            cursor = res.cursor
+            if not cursor: break
+        return count
+
+    async def list_users(self) -> List[int]:
+        users = []
+        cursor = None
+        while True:
+            res = await self.kv.list(prefix="u:", cursor=cursor)
+            for k in res.keys:
+                try:
+                    users.append(int(k.name.split(":")[1]))
+                except: pass
+            cursor = res.cursor
+            if not cursor: break
+        return users
+
+    async def add_force_sub(self, key: str, title: str, chat: str, url: str) -> None:
+        subs = await self._get_json("force_subs", {})
+        subs[key] = {"key": key, "title": title, "chat": chat, "url": url, "created_at": now_utc()}
+        await self._set_json("force_subs", subs)
+
+    async def remove_force_sub(self, target: str) -> bool:
+        subs = await self._get_json("force_subs", {})
+        remove_key = None
+        for k, v in subs.items():
+            if _flexible_match(v, target):
+                remove_key = k
+                break
+        if remove_key:
+            del subs[remove_key]
+            await self._set_json("force_subs", subs)
+            return True
+        return False
+
+    async def list_force_subs(self) -> List[Dict[str, Any]]:
+        subs = await self._get_json("force_subs", {})
+        return list(subs.values())
+
+    async def count_force_subs(self) -> int:
+        subs = await self._get_json("force_subs", {})
+        return len(subs)
+
+    async def add_channel(self, key: str, title: str, url: str) -> None:
+        chs = await self._get_json("channels", {})
+        chs[key] = {"key": key, "title": title, "url": url, "created_at": now_utc()}
+        await self._set_json("channels", chs)
+
+    async def remove_channel(self, target: str) -> bool:
+        chs = await self._get_json("channels", {})
+        remove_key = None
+        for k, v in chs.items():
+            if _flexible_match(v, target):
+                remove_key = k
+                break
+        if remove_key:
+            del chs[remove_key]
+            await self._set_json("channels", chs)
+            return True
+        return False
+
+    async def list_channels(self) -> List[Dict[str, Any]]:
+        chs = await self._get_json("channels", {})
+        return list(chs.values())
+
+    async def count_channels(self) -> int:
+        chs = await self._get_json("channels", {})
+        return len(chs)
+
+    async def add_force_request(self, user_id: int, username: str, first_name: str, link: str) -> None:
+        reqs = await self._get_json("force_requests", [])
+        reqs.append({
+            "user_id": user_id, "username": username,
+            "first_name": first_name, "link": link, "created_at": now_utc(),
+        })
+        await self._set_json("force_requests", reqs)
+
+    async def get_force_requests(self) -> List[Dict[str, Any]]:
+        return await self._get_json("force_requests", [])
+
+    async def delete_force_request(self, index: int) -> bool:
+        reqs = await self._get_json("force_requests", [])
+        if 0 <= index < len(reqs):
+            reqs.pop(index)
+            await self._set_json("force_requests", reqs)
+            return True
+        return False
+
+    async def save_msg_map(self, msg_id: int, user_id: int) -> None:
+        await self.kv.put(f"m:{msg_id}", str(user_id))
+
+    async def get_msg_user(self, msg_id: int) -> Optional[int]:
+        val = await self.kv.get(f"m:{msg_id}")
+        return int(val) if val else None
+
+    async def add_referral(self, referrer_id: int, new_user_id: int) -> bool:
+        hit = False
+        rd = await self._get_json(f"ref:{referrer_id}", {
+            "count": 0, "referred_users": [], "premium_until": None, "referred_by": None,
+        })
+        if new_user_id not in rd["referred_users"]:
+            rd["referred_users"].append(new_user_id)
+            rd["count"] += 1
+            if rd["count"] % REFERRAL_THRESHOLD == 0:
+                hit = True
+            await self._set_json(f"ref:{referrer_id}", rd)
+
+        nd = await self._get_json(f"ref:{new_user_id}", {
+            "count": 0, "referred_users": [], "premium_until": None, "referred_by": None,
+        })
+        if nd["referred_by"] is None:
+            nd["referred_by"] = referrer_id
+            await self._set_json(f"ref:{new_user_id}", nd)
+        return hit
+
+    async def get_referral_count(self, user_id: int) -> int:
+        rd = await self._get_json(f"ref:{user_id}", {"count": 0})
+        return rd["count"]
+
+    async def is_premium(self, user_id: int) -> bool:
+        rd = await self._get_json(f"ref:{user_id}", {})
+        pt = rd.get("premium_until")
+        if not pt: return False
+        try:
+            return datetime.fromisoformat(pt) > datetime.now(timezone.utc)
+        except: return False
+
+    async def set_premium(self, user_id: int, days: int) -> None:
+        rd = await self._get_json(f"ref:{user_id}", {
+            "count": 0, "referred_users": [], "premium_until": None, "referred_by": None,
+        })
+        base = datetime.now(timezone.utc)
+        try:
+            existing = datetime.fromisoformat(rd.get("premium_until") or "")
+            if existing > base: base = existing
+        except: pass
+        rd["premium_until"] = (base + timedelta(days=days)).isoformat()
+        await self._set_json(f"ref:{user_id}", rd)
+
+    async def get_premium_until(self, user_id: int) -> Optional[str]:
+        rd = await self._get_json(f"ref:{user_id}", {})
+        return rd.get("premium_until")
+
+    async def remove_premium(self, user_id: int) -> bool:
+        rd = await self._get_json(f"ref:{user_id}", {})
+        if not rd or not rd.get("premium_until"): return False
+        rd["premium_until"] = None
+        await self._set_json(f"ref:{user_id}", rd)
+        return True
+
+    async def list_premium_users(self) -> List[Dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        results = []
+        cursor = None
+        while True:
+            res = await self.kv.list(prefix="ref:", cursor=cursor)
+            for k in res.keys:
+                rd = await self._get_json(k.name, {})
+                pt = rd.get("premium_until")
+                if pt:
+                    try:
+                        if datetime.fromisoformat(pt) > now:
+                            results.append({"user_id": int(k.name.split(":")[1]), "premium_until": pt})
+                    except: pass
+            cursor = res.cursor
+            if not cursor: break
+        return results
+
+
+# ═══════════════════════════════════════════════════════════════
 #  MONGO STORAGE
 # ═══════════════════════════════════════════════════════════════
 class MongoStorage(BaseStorage):
@@ -775,7 +1026,14 @@ class MongoStorage(BaseStorage):
 
 
 # ─────────────────────────────────────────────────────────────
-async def build_storage() -> BaseStorage:
+async def build_storage(env=None) -> BaseStorage:
+    # If BLAZE_KV is provided in env (Cloudflare environment)
+    if env and hasattr(env, "BLAZE_KV"):
+        kv_store = KVStorage(env.BLAZE_KV)
+        await kv_store.init()
+        print("[DB] KV storage connected.")
+        return kv_store
+
     if MONGO_URI:
         try:
             mongo = MongoStorage(MONGO_URI)
@@ -1831,17 +2089,13 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ═══════════════════════════════════════════════════════════════
 #  BOOT
 # ═══════════════════════════════════════════════════════════════
-async def init_storage() -> None:
+async def init_storage(env=None) -> None:
     global storage
-    storage = await build_storage()
+    storage = await build_storage(env)
 
 
-def main() -> None:
-    asyncio.run(init_storage())
-
-    app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # ── Commands ───────────────────────────────────────────────
+def create_app(token: str) -> Application:
+    app: Application = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start",        cmd_start))
     app.add_handler(CommandHandler("help",         cmd_help))
     app.add_handler(CommandHandler("admin",        cmd_admin))
@@ -1892,7 +2146,42 @@ def main() -> None:
     ))
 
     app.add_error_handler(on_error)
+    return app
 
+
+async def on_fetch(request, env):
+    # Update global config from env
+    global BOT_TOKEN, OWNER_ID, OWNER_USERNAME, MINI_APP_URL, START_PHOTO
+    if hasattr(env, "BOT_TOKEN"): BOT_TOKEN = env.BOT_TOKEN
+    if hasattr(env, "OWNER_ID"): OWNER_ID = int(env.OWNER_ID)
+    if hasattr(env, "OWNER_USERNAME"): OWNER_USERNAME = env.OWNER_USERNAME.strip().lstrip("@")
+    if hasattr(env, "MINI_APP_URL"): MINI_APP_URL = env.MINI_APP_URL
+    if hasattr(env, "START_PHOTO"): START_PHOTO = env.START_PHOTO
+
+    if storage is None:
+        await init_storage(env)
+
+    app = create_app(BOT_TOKEN)
+    await app.initialize()
+
+    if request.method == "POST":
+        try:
+            payload = await request.json()
+            # Convert payload to dict if it's a JS object
+            if hasattr(payload, "to_py"):
+                payload = payload.to_py()
+            update = Update.de_json(payload, app.bot)
+            await app.process_update(update)
+        except Exception as exc:
+            print(f"Error processing update: {exc}")
+        return Response.new("OK")
+
+    return Response.new("Bot is running!")
+
+
+def main() -> None:
+    asyncio.run(init_storage())
+    app = create_app(BOT_TOKEN)
     print(f"[Bot] {BOT_NAME} is running…")
     app.run_polling()
 
