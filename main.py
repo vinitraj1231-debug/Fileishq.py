@@ -1035,7 +1035,7 @@ async def build_storage(env=None) -> BaseStorage:
         print("[DB] KV storage connected.")
         return kv_store
 
-    if MONGO_URI and AsyncIOMotorClient:
+    if MONGO_URI and globals().get("AsyncIOMotorClient"):
         try:
             mongo = MongoStorage(MONGO_URI)
             await mongo.init()
@@ -2194,6 +2194,13 @@ async def on_fetch(request, env):
 
 
 def main() -> None:
+    # If running in a build/CI environment, don't start polling.
+    # The Cloudflare dashboard shows "Deploy command: python main.py",
+    # which could hang the build if it starts a long-running process.
+    if os.getenv("CI") or os.getenv("CLOUDFLARE_BUILD") or os.getenv("GITHUB_ACTIONS"):
+        print("Build/CI environment detected. Exiting main() to prevent hang.")
+        return
+
     asyncio.run(init_storage())
     app = create_app(BOT_TOKEN)
     print(f"[Bot] {BOT_NAME} is running…")
